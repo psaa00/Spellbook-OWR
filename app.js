@@ -1,12 +1,14 @@
 const API_ROOT = "https://www.dnd5eapi.co/api";
 const SDK_URL = "https://esm.sh/@owlbear-rodeo/sdk@3.1.0";
 const STORAGE_PREFIX = "obr-spellbook:v1";
+const SRD_CACHE_SCHEMA = "v2";
 const CUSTOM_URL = new URL("./custom-spells.json", import.meta.url).href;
 
 const el = (id) => document.getElementById(id);
 const state = {
   OBR: null,
   role: "UNKNOWN",
+  roomId: null,
   standalone: window.parent === window,
   edition: "2014",
   srd: [],
@@ -77,6 +79,19 @@ function textValue(value) {
   if (value && typeof value === "object") return String(value.name || value.text || "");
   return value == null ? "" : String(value);
 }
+function pickField(object, ...keys) {
+  if (!object || typeof object !== "object") return undefined;
+  for (const key of keys) {
+    if (object[key] !== undefined && object[key] !== null && object[key] !== "") return object[key];
+  }
+  const entries = Object.entries(object);
+  for (const key of keys) {
+    const wanted = String(key).toLocaleLowerCase("ru");
+    const found = entries.find(([actual]) => actual.toLocaleLowerCase("ru") === wanted);
+    if (found && found[1] !== undefined && found[1] !== null && found[1] !== "") return found[1];
+  }
+  return undefined;
+}
 function safeHttpUrl(value) {
   if (!value) return "";
   try {
@@ -101,56 +116,135 @@ function parseLevel(value) {
 function normaliseDamageMap(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value)
-    .map(([key, formula]) => [String(key), textValue(formula).trim()])
+    .map(([key, formula]) => [String(key), firstDiceFormula(formula?.formula ?? formula?.damage_dice ?? formula?.damageDice ?? formula)])
     .filter(([, formula]) => formula));
+}
+const DAMAGE_TYPE_PATTERNS = [
+  ["кислотный", /кислот|acid/i], ["дробящий", /дробящ|bludgeon/i],
+  ["холод", /холод|cold/i], ["огонь", /огн(?:ём|ем|я|енный|енного)?|fire/i],
+  ["силовой", /силов|force/i], ["электричество", /электрич|молни|lightning/i],
+  ["некротический", /некрот|necrotic/i], ["колющий", /колющ|piercing/i],
+  ["яд", /ядом|яда|poison/i], ["психический", /психич|psychic/i],
+  ["излучение", /излучен|radiant/i], ["рубящий", /рубящ|slashing/i],
+  ["громовой", /громов|thunder/i],
+];
+function inferDamageType(text) {
+  for (const [type, pattern] of DAMAGE_TYPE_PATTERNS) if (pattern.test(text)) return type;
+  return "";
+}
+function inferDamageTypeNear(text, start, end) {
+  const from = Math.max(0, start - 48);
+  const to = Math.min(text.length, end + 48);
+  const slice = text.slice(from, to);
+  let best = { type: "", distance: Infinity };
+  for (const [type, pattern] of DAMAGE_TYPE_PATTERNS) {
+    const re = new RegExp(pattern.source, "gi");
+    for (const match of slice.matchAll(re)) {
+      const absoluteStart = from + match.index;
+      const absoluteEnd = absoluteStart + match[0].length;
+      const distance = absoluteEnd < start ? start - absoluteEnd : absoluteStart > end ? absoluteStart - end : 0;
+      if (distance < best.distance) best = { type, distance };
+    }
+  }
+  return best.type;
+}
+function extractDamageProfilesFromText(value) {
+  const text = textValue(value);
+  if (!text) return [];
+  const dicePattern = /(?:\d{1,3})?d\d{1,4}(?:\s*[+-]\s*\d{1,5})*/gi;
+  const damageWord = /урон|поврежден|damage|damages|damaging|наносит|получает|takes|deals/i;
+  const profiles = [];
+  for (const match of text.matchAll(dicePattern)) {
+    const formula = match[0].replace(/\s+/g, "");
+    const start = Math.max(0, match.index - 55);
+    const end = Math.min(text.length, match.index + match[0].length + 75);
+    const context = text.slice(start, end);
+    if (!damageWord.test(context)) continue;
+    // Do not treat healing dice or unrelated dice in a spell's prose as damage.
+    if (/лечит|восстанавливает хиты|hit points restored|regains hit points/i.test(context)) continue;
+    // Split nearby prose into clauses so two damage types in one sentence
+    // (e.g. a prismatic spell) are not accidentally assigned to the same die.
+    const relativeStart = match.index - start;
+    const relativeEnd = relativeStart + match[0].length;
+    const separators = /[,;.!?]|\s+(?:и|или|and|or)\s+/gi;
+    let clauseStart = 0;
+    let clauseEnd = context.length;
+    for (const sep of context.matchAll(separators)) {
+      const sepStart = sep.index;
+      const sepEnd = sepStart + sep[0].length;
+      if (sepEnd <= relativeStart) clauseStart = sepEnd;
+      else if (sepStart >= relativeEnd) { clauseEnd = sepStart; break; }
+    }
+    const clause = context.slice(clauseStart, clauseEnd);
+    const type = inferDamageType(clause) || inferDamageTypeNear(text, match.index, match.index + match[0].length) || inferDamageType(context);
+    if (!profiles.some((item) => item.formula === formula && item.type === type)) {
+      profiles.push({ type, formula, atSlotLevel: {}, atCharacterLevel: {}, inferredFromDescription: true });
+    }
+  }
+  return profiles;
+}
+function firstDiceFormula(value) {
+  const text = textValue(value).trim();
+  const match = text.match(/(?:\d{1,3})?d\d{1,4}(?:\s*[+-]\s*\d{1,5})*/i);
+  return match ? match[0].replace(/\s+/g, "") : "";
 }
 function normaliseSpell(raw, index = 0, source = "Пользовательская библиотека") {
   if (!raw || typeof raw !== "object") return null;
-  const name = textValue(raw.name ?? raw.title ?? raw["Название"] ?? raw["Заклинание"]).trim();
+  const name = textValue(pickField(raw, "name", "title", "Название", "Заклинание")).trim();
   if (!name) return null;
-  const rawSchool = getObjectName(raw.school ?? raw["Школа"]);
-  const rawClasses = raw.classes ?? raw.class ?? raw["Классы"] ?? raw["Класс"] ?? [];
-  const desc = raw.description ?? raw.desc ?? raw.text ?? raw["Описание"] ?? raw["Текст"] ?? "";
-  const rawDamage = raw.damage;
+  const rawSchool = getObjectName(pickField(raw, "school", "Школа"));
+  const rawClasses = pickField(raw, "classes", "class", "Классы", "Класс") ?? [];
+  const desc = pickField(raw, "description", "desc", "text", "Описание", "Текст") ?? "";
+  const rawDamage = pickField(raw, "damage");
   const rawDamageEntries = Array.isArray(rawDamage) ? rawDamage : (rawDamage && typeof rawDamage === "object" ? [rawDamage] : []);
-  const exportedProfiles = Array.isArray(raw.damageProfiles) ? raw.damageProfiles : [];
+  const exportedProfilesValue = pickField(raw, "damageProfiles", "damage_profiles");
+  const exportedProfiles = Array.isArray(exportedProfilesValue) ? exportedProfilesValue : [];
   const damageProfiles = (exportedProfiles.length ? exportedProfiles : rawDamageEntries).map((entry) => ({
     type: textValue(getObjectName(entry?.type ?? entry?.damage_type ?? entry?.damageType ?? "")),
-    formula: textValue(entry?.formula ?? "").trim(),
+    formula: firstDiceFormula(entry?.formula ?? entry?.damage_dice ?? entry?.damageDice ?? ""),
     atSlotLevel: normaliseDamageMap(entry?.atSlotLevel ?? entry?.damage_at_slot_level ?? entry?.at_slot_level),
     atCharacterLevel: normaliseDamageMap(entry?.atCharacterLevel ?? entry?.damage_at_character_level ?? entry?.at_character_level),
   })).filter((profile) => profile.formula || Object.keys(profile.atSlotLevel).length || Object.keys(profile.atCharacterLevel).length);
-  const damageFormula = textValue(raw.damageFormula ?? raw.damage_formula ?? raw["Формула урона"] ?? raw["Урон"] ?? (typeof rawDamage === "string" ? rawDamage : "")).trim();
-  const damageAtSlotLevel = normaliseDamageMap(raw.damageAtSlotLevel ?? raw.damage_at_slot_level);
-  const damageAtCharacterLevel = normaliseDamageMap(raw.damageAtCharacterLevel ?? raw.damage_at_character_level);
-  const damageType = textValue(getObjectName(raw.damageType ?? raw.damage_type ?? ""));
+  const explicitDamageValue = pickField(raw, "damageFormula", "damage_formula", "damage_dice", "damageDice", "Формула урона", "Урон") ?? rawDamage?.damage_dice ?? rawDamage?.damageDice ?? (typeof rawDamage === "string" ? rawDamage : "");
+  const damageFormula = firstDiceFormula(explicitDamageValue);
+  const damageAtSlotLevel = normaliseDamageMap(pickField(raw, "damageAtSlotLevel", "damage_at_slot_level"));
+  const damageAtCharacterLevel = normaliseDamageMap(pickField(raw, "damageAtCharacterLevel", "damage_at_character_level"));
+  const damageType = textValue(getObjectName(pickField(raw, "damageType", "damage_type")));
   if (!damageProfiles.length && (damageFormula || Object.keys(damageAtSlotLevel).length || Object.keys(damageAtCharacterLevel).length)) {
-    damageProfiles.push({ type: damageType, formula: damageFormula, atSlotLevel: damageAtSlotLevel, atCharacterLevel: damageAtCharacterLevel });
+    damageProfiles.push({ type: damageType || inferDamageType(`${textValue(explicitDamageValue)} ${textValue(desc)}`), formula: damageFormula, atSlotLevel: damageAtSlotLevel, atCharacterLevel: damageAtCharacterLevel });
   }
-  const id = String(raw.id ?? raw.index ?? `custom-${slugify(name)}`);
+  if (explicitDamageValue && typeof explicitDamageValue === "string") {
+    const explicitTextProfiles = extractDamageProfilesFromText(explicitDamageValue);
+    if (explicitTextProfiles.length > 1) {
+      damageProfiles.length = 0;
+      damageProfiles.push(...explicitTextProfiles);
+    }
+  }
+  if (!damageProfiles.length) damageProfiles.push(...extractDamageProfilesFromText(desc));
+  const id = String(pickField(raw, "id", "index") ?? `custom-${slugify(name)}`);
   const spell = {
     id,
     name,
-    level: parseLevel(raw.level ?? raw.spellLevel ?? raw["Уровень"] ?? raw["Круг"]),
+    level: parseLevel(pickField(raw, "level", "spellLevel", "Уровень", "Круг")),
     school: rawSchool || "Не указана",
     classes: toArray(rawClasses).map((x) => niceClass(x)),
-    castingTime: textValue(raw.castingTime ?? raw.casting_time ?? raw["Время накладывания"] ?? raw["Время сотворения"]),
-    range: textValue(raw.range ?? raw["Дальность"] ?? raw["Дистанция"]),
-    components: toArray(raw.components ?? raw["Компоненты"]),
-    material: textValue(raw.material ?? raw["Материал"]),
-    duration: textValue(raw.duration ?? raw["Длительность"]),
-    concentration: parseBoolean(raw.concentration ?? raw["Концентрация"]),
-    ritual: parseBoolean(raw.ritual ?? raw["Ритуал"]),
+    castingTime: textValue(pickField(raw, "castingTime", "casting_time", "Время накладывания", "Время сотворения")),
+    range: textValue(pickField(raw, "range", "Дальность", "Дистанция")),
+    components: toArray(pickField(raw, "components", "Компоненты")),
+    material: textValue(pickField(raw, "material", "Материал")),
+    duration: textValue(pickField(raw, "duration", "Длительность")),
+    concentration: parseBoolean(pickField(raw, "concentration", "Концентрация")),
+    ritual: parseBoolean(pickField(raw, "ritual", "Ритуал")),
     description: textValue(desc),
-    higherLevel: textValue(raw.higherLevel ?? raw.higher_level ?? raw["На высоких уровнях"]),
+    higherLevel: textValue(pickField(raw, "higherLevel", "higher_level", "На высоких уровнях")),
     damageFormula,
     damageAtSlotLevel,
     damageAtCharacterLevel,
     damageType,
     damageProfiles,
-    source: textValue(raw.source ?? raw.sourceName ?? raw["Источник"]) || source,
-    sourceUrl: safeHttpUrl(textValue(raw.sourceUrl ?? raw.url)),
-    origin: raw.origin || "custom",
+    source: textValue(pickField(raw, "source", "sourceName", "Источник")) || source,
+    sourceUrl: safeHttpUrl(textValue(pickField(raw, "sourceUrl", "url"))),
+    origin: pickField(raw, "origin") || "custom",
   };
   if (spell.school && SCHOOL_NAMES[spell.school.toLowerCase()]) spell.school = SCHOOL_NAMES[spell.school.toLowerCase()];
   return spell;
@@ -181,7 +275,7 @@ function uniqueMerge(...groups) {
 function getCurrentSpells() {
   return uniqueMerge(state.srd, state.publishedCustom, isGM() ? state.draft : []);
 }
-function isGM() { return state.role === "GM" || state.standalone; }
+function isGM() { return state.role === "GM" || state.role === "NO_ROOM" || state.standalone; }
 function localGet(key) {
   try { return JSON.parse(localStorage.getItem(`${STORAGE_PREFIX}:${key}`) || "null"); }
   catch { return null; }
@@ -239,7 +333,7 @@ async function connectToOwlbear() {
     el("roleBadge").textContent = "ПРЕДПРОСМОТР · МАСТЕР";
     el("roleBadge").classList.add("gm");
     el("adminPanel").hidden = false;
-    setNotice("Предпросмотр вне Owlbear Rodeo: можно проверить каталог и импорт. Для игроков подключи расширение в комнате.");
+    setNotice("Предпросмотр вне Owlbear Rodeo: можно проверить каталог и импорт. Для обмена бросками открой игровую комнату.");
     return;
   }
   try {
@@ -249,10 +343,25 @@ async function connectToOwlbear() {
     if (!OBR.isAvailable) {
       state.role = "PLAYER";
       el("roleBadge").textContent = "ВНЕ OWLBEAR";
+      el("adminPanel").hidden = true;
       setNotice("Owlbear Rodeo не обнаружен. Интерфейс открыт в режиме просмотра.");
       return;
     }
     await waitForObrReady(OBR);
+    state.roomId = OBR.room?.id || null;
+    if (!state.roomId) {
+      // In the lobby there is no room role. Allow only local library preparation:
+      // drafts stay in this browser and are not broadcast or shared with players.
+      state.role = "NO_ROOM";
+      el("roleBadge").textContent = "ПОДГОТОВКА";
+      el("roleBadge").classList.remove("gm");
+      el("roleBadge").classList.add("prep");
+      el("adminPanel").hidden = false;
+      const lock = el("adminPanel").querySelector(".admin-lock");
+      if (lock) lock.textContent = "Локально · не опубликовано";
+      setNotice("Локальная подготовка библиотеки: импортируй заклинания здесь — черновик сохранится в этом браузере. Для бросков и роли ГМа открой игровую комнату; опубликованную библиотеку увидят все, кто загрузит её файл.", "success");
+      return;
+    }
     state.role = await OBR.player.getRole();
     if (OBR.broadcast?.onMessage) {
       state.unsubscribeRolls?.();
@@ -265,18 +374,23 @@ async function connectToOwlbear() {
     if (state.role === "GM") {
       el("roleBadge").textContent = "МАСТЕР";
       el("roleBadge").classList.add("gm");
+      el("roleBadge").classList.remove("prep");
       el("adminPanel").hidden = false;
-      setNotice("Ты вошёл как мастер. Импортируй пользовательские заклинания и опубликуй файл для игроков.");
+      const lock = el("adminPanel").querySelector(".admin-lock");
+      if (lock) lock.textContent = "Только мастер";
+      setNotice("Ты вошёл в игровую комнату как мастер. Можно импортировать пользовательские заклинания.", "success");
     } else {
       el("roleBadge").textContent = "ИГРОК";
+      el("roleBadge").classList.remove("gm", "prep");
       el("adminPanel").hidden = true;
       setNotice("Режим игрока: каталог доступен для поиска и просмотра.");
     }
   } catch (error) {
-    state.role = "PLAYER";
-    el("roleBadge").textContent = "ИГРОК";
+    state.role = "UNKNOWN";
+    el("roleBadge").textContent = "НЕТ ПОДКЛЮЧЕНИЯ";
+    el("roleBadge").classList.remove("gm");
     el("adminPanel").hidden = true;
-    setNotice("Не удалось подключить SDK Owlbear Rodeo. Каталог можно просматривать, но управление доступно только после подключения в комнате.", "error");
+    setNotice(`Не удалось подключить SDK Owlbear Rodeo: ${error.message}. Обнови страницу комнаты и снова открой расширение.`, "error");
     console.error("OBR SDK connection error", error);
   }
 }
@@ -323,7 +437,7 @@ async function loadSrd(year, force = false) {
   state.loading = true;
   el("refreshSrd").disabled = true;
   el("refreshSrd").classList.add("spinning");
-  const cached = localGet(`srd-${year}`);
+  const cached = localGet(`srd-${year}-${SRD_CACHE_SCHEMA}`);
   const cacheHasDamageSchema = cached && Array.isArray(cached.spells) && cached.spells.every((spell) => Object.prototype.hasOwnProperty.call(spell || {}, "damageProfiles"));
   const cacheIsFresh = cached && Array.isArray(cached.spells) && cacheHasDamageSchema && Date.now() - cached.savedAt < 7 * 24 * 60 * 60 * 1000;
   if (!force && cacheIsFresh) {
@@ -348,7 +462,7 @@ async function loadSrd(year, force = false) {
     }, (done, total) => setNotice(`Загружаем описания заклинаний: ${done} из ${total}…`));
     if (generation !== state.loadGeneration || year !== state.edition) return;
     state.srd = details.map((x) => normaliseSrdSpell(x, year)).filter(Boolean);
-    localSet(`srd-${year}`, { savedAt: Date.now(), spells: state.srd });
+    localSet(`srd-${year}-${SRD_CACHE_SCHEMA}`, { savedAt: Date.now(), spells: state.srd });
     setNotice(`Готово: загружено ${state.srd.length} заклинаний из SRD ${year === "2014" ? "5.1" : "5.2"}. Текущий API не содержит русского перевода; русские версии можно импортировать отдельно.`, "success");
   } catch (error) {
     if (generation !== state.loadGeneration || year !== state.edition) return;
@@ -593,16 +707,16 @@ async function performSpellDamageRoll(spell, formula) {
     if (state.OBR?.notification?.show) {
       try { await state.OBR.notification.show(`${spell.name}: ${result.details}`, "SUCCESS"); } catch { /* уведомление не должно ломать бросок */ }
     }
-    if (state.OBR?.isAvailable) {
+    if (state.OBR?.isAvailable && state.roomId) {
       try {
         await sendRoomRoll(state.OBR, roll);
         setNotice(`Бросок «${spell.name}»: ${result.total}. Результат отправлен участникам комнаты.`, "success");
       } catch (error) {
         console.warn("Spellbook could not broadcast roll", error);
-        setNotice(`Бросок рассчитан: ${result.total}. Отправка участникам не удалась: ${error?.message || error}. Проверь, что Owlbear Rodeo подключён к комнате и у игроков установлено расширение.`, "error");
+        setNotice(`Бросок рассчитан: ${result.total}. Не удалось отправить его участникам: ${error?.message || error}. Проверь подключение к комнате.`, "error");
       }
     } else {
-      setNotice(`Бросок «${spell.name}»: ${result.total}. Результат пока виден только здесь.`, "success");
+      setNotice(`Бросок «${spell.name}»: ${result.total}. Ты вне игровой комнаты, поэтому результат виден только здесь.`, "success");
     }
   } catch (error) {
     setNotice(`Не удалось бросить кости: ${error.message}`, "error");
@@ -624,7 +738,9 @@ function addDamageRollSection(parent, spell) {
   const section = document.createElement("section"); section.className = "detail-section damage-section";
   const heading = document.createElement("h3"); heading.textContent = "Бросок урона";
   const description = document.createElement("p"); description.className = "damage-hint";
-  description.textContent = "Результат рассчитывается без анимации и отправляется участникам, у которых открыта Книга заклинаний.";
+  description.textContent = profiles.some((profile) => profile.inferredFromDescription)
+    ? "Формулы распознаны из текста описания автоматически — проверь их перед броском. Результаты отправляются участникам комнаты."
+    : "Результат рассчитывается без анимации и отправляется участникам комнаты.";
   section.append(heading, description);
 
   profiles.forEach((profile, index) => {
@@ -868,7 +984,14 @@ async function init() {
   rebuild();
   await loadSrd(state.edition);
   rebuild();
-  if (isGM() && state.draft.length) setAdminStatus(`Восстановлен локальный черновик: ${state.draft.length} заклинаний. Для игроков скачай и опубликуй custom-spells.json.`);
+  if (state.role === "NO_ROOM") {
+    setAdminStatus(state.draft.length
+      ? `Локальный черновик: ${state.draft.length} заклинаний. Он сохранён в этом браузере.`
+      : "Импортируй JSON, CSV, Markdown или TXT. Черновик останется локальным.");
+    setNotice("Режим подготовки вне игровой комнаты: импорт доступен, но броски пока не отправляются участникам.", "success");
+  } else if (isGM() && state.draft.length) {
+    setAdminStatus(`Восстановлен локальный черновик: ${state.draft.length} заклинаний. Для игроков скачай и опубликуй custom-spells.json.`);
+  }
 }
 
 init().catch((error) => {

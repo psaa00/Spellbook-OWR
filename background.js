@@ -22,6 +22,10 @@ async function start() {
       });
     }
     if (!OBR.isReady) throw new Error("Owlbear Rodeo SDK is not ready; broadcast listener was not started");
+    if (!OBR.room?.id) {
+      console.info("Spellbook background: no active game room; broadcast listener skipped.");
+      return;
+    }
     OBR.broadcast?.onMessage(ROLL_CHANNEL, (event) => {
       const roll = event?.data;
       if (!roll || roll.kind !== "spell-damage-roll" || typeof roll.total !== "number") return;
