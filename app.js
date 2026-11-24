@@ -190,14 +190,48 @@ function localSet(key, value) {
   try { localStorage.setItem(`${STORAGE_PREFIX}:${key}`, JSON.stringify(value)); return true; }
   catch { setNotice("Не удалось сохранить кэш в браузере. Возможно, закончилось место.", "error"); return false; }
 }
-function waitForObrReady(OBR) {
+function waitForObrReady(OBR, timeoutMs = 20000) {
+  if (!OBR?.isAvailable) return Promise.reject(new Error("Расширение открыто вне Owlbear Rodeo."));
   if (OBR.isReady) return Promise.resolve();
-  return new Promise((resolve) => {
-    let off;
-    const done = () => { off?.(); resolve(); };
-    off = OBR.onReady(done);
-    setTimeout(done, 12000);
+  return new Promise((resolve, reject) => {
+    let off = null;
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { off?.(); } catch { /* подписка могла ещё не завершиться */ }
+      if (error) reject(error); else resolve();
+    };
+    const timer = setTimeout(() => {
+      finish(new Error("Owlbear Rodeo ещё не готов к обмену сообщениями. Закрой и снова открой расширение; если ошибка повторится, обнови страницу комнаты."));
+    }, timeoutMs);
+    try {
+      off = OBR.onReady(() => finish());
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error(String(error)));
+    }
   });
+}
+function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+async function sendRoomRoll(OBR, roll) {
+  if (!OBR?.broadcast?.sendMessage) throw new Error("Broadcast API недоступен в этой версии Owlbear Rodeo.");
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await waitForObrReady(OBR);
+    try {
+      // REMOTE is the documented default; omit options for compatibility with SDK builds.
+      await OBR.broadcast.sendMessage(ROLL_CHANNEL, roll);
+      return;
+    } catch (error) {
+      lastError = error;
+      const message = String(error?.message || error);
+      if (!/not ready|ready/i.test(message) || attempt === 2) break;
+      // The SDK can report ready slightly before its broadcast transport is connected.
+      await delay(400 * (attempt + 1));
+    }
+  }
+  throw lastError || new Error("Не удалось отправить сообщение участникам комнаты.");
 }
 async function connectToOwlbear() {
   if (state.standalone) {
@@ -559,15 +593,16 @@ async function performSpellDamageRoll(spell, formula) {
     if (state.OBR?.notification?.show) {
       try { await state.OBR.notification.show(`${spell.name}: ${result.details}`, "SUCCESS"); } catch { /* уведомление не должно ломать бросок */ }
     }
-    if (state.OBR?.broadcast?.sendMessage) {
+    if (state.OBR?.isAvailable) {
       try {
-        await state.OBR.broadcast.sendMessage(ROLL_CHANNEL, roll, { destination: "REMOTE" });
+        await sendRoomRoll(state.OBR, roll);
         setNotice(`Бросок «${spell.name}»: ${result.total}. Результат отправлен участникам комнаты.`, "success");
       } catch (error) {
-        setNotice(`Результат: ${result.total}. Не удалось отправить его остальным участникам: ${error.message}`, "error");
+        console.warn("Spellbook could not broadcast roll", error);
+        setNotice(`Бросок рассчитан: ${result.total}. Отправка участникам не удалась: ${error?.message || error}. Проверь, что Owlbear Rodeo подключён к комнате и у игроков установлено расширение.`, "error");
       }
     } else {
-      setNotice(`Бросок «${spell.name}»: ${result.total}. Вне комнаты результат виден только здесь.`, "success");
+      setNotice(`Бросок «${spell.name}»: ${result.total}. Результат пока виден только здесь.`, "success");
     }
   } catch (error) {
     setNotice(`Не удалось бросить кости: ${error.message}`, "error");
