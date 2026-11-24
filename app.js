@@ -3,6 +3,7 @@ const SDK_URL = "https://esm.sh/@owlbear-rodeo/sdk@3.1.0";
 const STORAGE_PREFIX = "obr-spellbook:v1";
 const SRD_CACHE_SCHEMA = "v3";
 const CUSTOM_URL = new URL("./custom-spells.json", import.meta.url).href;
+const SRD_RU_URLS = { "2014": new URL("./srd-2014-ru.json", import.meta.url).href };
 
 const el = (id) => document.getElementById(id);
 const state = {
@@ -313,6 +314,11 @@ function normaliseSpell(raw, index = 0, source = "Пользовательска
     nameRu: textValue(pickField(raw, "nameRu", "name_ru", "Название RU")),
     descriptionRu: textValue(pickField(raw, "descriptionRu", "description_ru", "Описание RU")),
     higherLevelRu: textValue(pickField(raw, "higherLevelRu", "higher_level_ru", "На высоких уровнях RU")),
+    castingTimeRu: textValue(pickField(raw, "castingTimeRu", "casting_time_ru")),
+    rangeRu: textValue(pickField(raw, "rangeRu", "range_ru")),
+    componentsRu: textValue(pickField(raw, "componentsRu", "components_ru")),
+    materialRu: textValue(pickField(raw, "materialRu", "material_ru")),
+    durationRu: textValue(pickField(raw, "durationRu", "duration_ru")),
     source: textValue(pickField(raw, "source", "sourceName", "Источник")) || source,
     sourceUrl: safeHttpUrl(textValue(pickField(raw, "sourceUrl", "url"))),
     origin: pickField(raw, "origin") || "custom",
@@ -506,6 +512,35 @@ async function mapLimit(items, limit, task, onProgress) {
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return results.filter(Boolean);
 }
+async function applySrdTranslations(spells, year) {
+  const localeUrl = SRD_RU_URLS[year];
+  if (!localeUrl || !Array.isArray(spells) || !spells.length) return spells;
+  try {
+    const url = new URL(localeUrl);
+    url.searchParams.set("_v", "1");
+    const data = await fetchJson(url.toString(), { cache: "no-store" });
+    const entries = Array.isArray(data) ? data : (data.spells || []);
+    const byName = new Map(entries.filter((x) => x?.name).map((x) => [String(x.name).trim().toLocaleLowerCase("en"), x]));
+    let applied = 0;
+    const fields = ["nameRu", "descriptionRu", "higherLevelRu", "castingTimeRu", "rangeRu", "componentsRu", "materialRu", "durationRu"];
+    const localized = spells.map((spell) => {
+      const translated = byName.get(String(spell.name).trim().toLocaleLowerCase("en"));
+      if (!translated) return spell;
+      const patch = {};
+      for (const field of fields) if (translated[field]) patch[field] = translated[field];
+      if (Object.keys(patch).length) applied += 1;
+      return { ...spell, ...patch };
+    });
+    state.localizedCount = applied;
+    state.localizationTotal = entries.length;
+    return localized;
+  } catch (error) {
+    console.info("Russian SRD localization could not be loaded:", error.message);
+    state.localizedCount = 0;
+    state.localizationTotal = 0;
+    return spells;
+  }
+}
 async function loadSrd(year, force = false) {
   const generation = ++state.loadGeneration;
   state.loading = true;
@@ -515,11 +550,12 @@ async function loadSrd(year, force = false) {
   const cacheHasCurrentSchema = cached && Array.isArray(cached.spells) && cached.spells.every((spell) => Object.prototype.hasOwnProperty.call(spell || {}, "damageProfiles") && Object.prototype.hasOwnProperty.call(spell || {}, "healingProfiles"));
   const cacheIsFresh = cached && Array.isArray(cached.spells) && cacheHasCurrentSchema && Date.now() - cached.savedAt < 7 * 24 * 60 * 60 * 1000;
   if (!force && cacheIsFresh) {
-    state.srd = cached.spells;
+    state.srd = await applySrdTranslations(cached.spells, year);
     state.loading = false;
     el("refreshSrd").disabled = false;
     el("refreshSrd").classList.remove("spinning");
-    setNotice(`Открытая библиотека SRD ${year === "2014" ? "5.1" : "5.2"} загружена из кэша (${state.srd.length} заклинаний).`, "success");
+    const cachedLocaleNotice = state.localizedCount ? ` Русская локализация: ${state.localizedCount} заклинаний.` : "";
+    setNotice(`Открытая библиотека SRD ${year === "2014" ? "5.1" : "5.2"} загружена из кэша (${state.srd.length} заклинаний).${cachedLocaleNotice}`, "success");
     rebuild();
     return;
   }
@@ -535,9 +571,11 @@ async function loadSrd(year, force = false) {
       catch { return ref; }
     }, (done, total) => setNotice(`Загружаем описания заклинаний: ${done} из ${total}…`));
     if (generation !== state.loadGeneration || year !== state.edition) return;
-    state.srd = details.map((x) => normaliseSrdSpell(x, year)).filter(Boolean);
+    const normalized = details.map((x) => normaliseSrdSpell(x, year)).filter(Boolean);
+    state.srd = await applySrdTranslations(normalized, year);
     localSet(`srd-${year}-${SRD_CACHE_SCHEMA}`, { savedAt: Date.now(), spells: state.srd });
-    setNotice(`Готово: загружено ${state.srd.length} заклинаний из SRD ${year === "2014" ? "5.1" : "5.2"}. Текущий API не содержит русского перевода; русские версии можно импортировать отдельно.`, "success");
+    const localeNotice = state.localizedCount ? ` Русская локализация: ${state.localizedCount} из ${state.srd.length}.` : " Русская локализация для этой редакции пока не загружена.";
+    setNotice(`Готово: загружено ${state.srd.length} заклинаний из SRD ${year === "2014" ? "5.1" : "5.2"}.${localeNotice}`, "success");
   } catch (error) {
     if (generation !== state.loadGeneration || year !== state.edition) return;
     if (cached && Array.isArray(cached.spells)) {
@@ -934,13 +972,14 @@ function getFiltered() {
   });
   const sort = el("sortSelect").value;
   const collator = new Intl.Collator("ru", { sensitivity: "base", numeric: true });
+  const displayName = (spell) => spellDisplayName(spell);
   filtered.sort((a, b) => {
-    if (sort === "level-asc") return a.level - b.level || collator.compare(a.name, b.name);
-    if (sort === "level-desc") return b.level - a.level || collator.compare(a.name, b.name);
-    if (sort === "class-asc") return collator.compare((a.classes || []).join(", "), (b.classes || []).join(", ")) || collator.compare(a.name,b.name);
-    if (sort === "school-asc") return collator.compare(a.school || "", b.school || "") || collator.compare(a.name,b.name);
-    if (sort === "name-desc") return collator.compare(b.name, a.name);
-    return collator.compare(a.name, b.name);
+    if (sort === "level-asc") return a.level - b.level || collator.compare(displayName(a), displayName(b));
+    if (sort === "level-desc") return b.level - a.level || collator.compare(displayName(a), displayName(b));
+    if (sort === "class-asc") return collator.compare((a.classes || []).join(", "), (b.classes || []).join(", ")) || collator.compare(displayName(a), displayName(b));
+    if (sort === "school-asc") return collator.compare(a.school || "", b.school || "") || collator.compare(displayName(a), displayName(b));
+    if (sort === "name-desc") return collator.compare(displayName(b), displayName(a));
+    return collator.compare(displayName(a), displayName(b));
   });
   return filtered;
 }
@@ -1023,10 +1062,12 @@ function renderDetail(spell) {
   if (spell.ritual) { const p = document.createElement("span"); p.className = "pill"; p.textContent = "Ритуал"; sub.append(p); }
   if (spell.concentration) { const p = document.createElement("span"); p.className = "pill"; p.textContent = "Концентрация"; sub.append(p); }
   const stats = document.createElement("div"); stats.className = "stat-grid";
-  addStat(stats, "Время накладывания", spell.castingTime);
-  addStat(stats, "Дальность", spell.range);
-  addStat(stats, "Компоненты", (spell.components || []).join(", ") + (spell.material ? ` · ${spell.material}` : ""));
-  addStat(stats, "Длительность", spell.duration + (spell.concentration ? " (концентрация)" : ""));
+  addStat(stats, "Время накладывания", spell.castingTimeRu || spell.castingTime);
+  addStat(stats, "Дальность", spell.rangeRu || spell.range);
+  const componentsText = spell.componentsRu || (spell.components || []).join(", ");
+  const materialText = spell.materialRu || spell.material;
+  addStat(stats, "Компоненты", componentsText + (materialText ? ` · ${materialText}` : ""));
+  addStat(stats, "Длительность", (spell.durationRu || spell.duration) + (spell.concentration ? " (концентрация)" : ""));
   wrap.append(top, title, sub, stats);
   addDamageRollSection(wrap, spell);
   addHealingRollSection(wrap, spell);
