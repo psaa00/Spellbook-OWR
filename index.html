@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#151a22" />
+  <title>Книга заклинаний — Owlbear Rodeo</title>
+  <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">✦</div>
+        <div>
+          <div class="eyebrow">БИБЛИОТЕКА МАГИИ</div>
+          <h1>Книга заклинаний</h1>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span id="roleBadge" class="role-badge">ПОДКЛЮЧЕНИЕ…</span>
+        <label class="edition-picker">
+          <span>Правила</span>
+          <select id="editionSelect" aria-label="Редакция SRD">
+            <option value="2014">D&amp;D 5e · 2014</option>
+            <option value="2024">D&amp;D 5e · 2024</option>
+          </select>
+        </label>
+        <button id="refreshSrd" class="icon-button" title="Обновить открытую библиотеку" aria-label="Обновить библиотеку">↻</button>
+      </div>
+    </header>
+
+    <div id="notice" class="notice" role="status" aria-live="polite">
+      <span class="notice-dot"></span><span id="noticeText">Загружаем библиотеку…</span>
+    </div>
+
+    <section class="search-row">
+      <label class="search-box">
+        <span class="search-icon">⌕</span>
+        <input id="searchInput" type="search" placeholder="Найти заклинание по названию или описанию…" autocomplete="off" />
+        <kbd>Ctrl K</kbd>
+      </label>
+      <div class="result-count"><strong id="resultCount">0</strong><span>заклинаний</span></div>
+    </section>
+
+    <section class="filter-row" aria-label="Фильтры и сортировка">
+      <label class="filter-field">
+        <span>Уровень</span>
+        <select id="levelFilter"><option value="">Все уровни</option></select>
+      </label>
+      <label class="filter-field">
+        <span>Класс</span>
+        <select id="classFilter"><option value="">Все классы</option></select>
+      </label>
+      <label class="filter-field">
+        <span>Школа</span>
+        <select id="schoolFilter"><option value="">Все школы</option></select>
+      </label>
+      <label class="filter-field sort-field">
+        <span>Сортировка</span>
+        <select id="sortSelect">
+          <option value="name-asc">Название · А—Я</option>
+          <option value="name-desc">Название · Я—А</option>
+          <option value="level-asc">Уровень · по возрастанию</option>
+          <option value="level-desc">Уровень · по убыванию</option>
+          <option value="class-asc">Класс</option>
+          <option value="school-asc">Школа</option>
+        </select>
+      </label>
+      <button id="resetFilters" class="text-button">Сбросить</button>
+    </section>
+
+    <main class="browser-layout">
+      <aside class="spell-list-panel">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">КАТАЛОГ</span>
+            <h2>Заклинания</h2>
+          </div>
+          <span id="catalogSource" class="source-chip">SRD</span>
+        </div>
+        <div id="spellList" class="spell-list" aria-label="Список заклинаний">
+          <div class="empty-state"><span class="spinner"></span><p>Загрузка каталога…</p></div>
+        </div>
+      </aside>
+
+      <section id="spellDetail" class="spell-detail-panel" aria-live="polite">
+        <div class="detail-placeholder">
+          <div class="large-sigil">✧</div>
+          <h2>Выберите заклинание</h2>
+          <p>Здесь появятся его описание, параметры и доступные классы.</p>
+        </div>
+      </section>
+    </main>
+
+    <section id="adminPanel" class="admin-panel" hidden>
+      <div class="admin-heading">
+        <div>
+          <span class="eyebrow">ИНСТРУМЕНТЫ МАСТЕРА</span>
+          <h2>Управление библиотекой</h2>
+        </div>
+        <span class="admin-lock">Только мастер</span>
+      </div>
+      <p class="admin-intro">Загрузи собственные или переведённые заклинания. Импорт сначала сохраняется как черновик в этом браузере. Чтобы игроки увидели записи, скачай общий файл и замени им <code>custom-spells.json</code> в GitHub-репозитории расширения.</p>
+      <div class="admin-actions">
+        <label class="upload-button" for="spellFileInput">＋ Импортировать файл</label>
+        <input id="spellFileInput" type="file" accept=".json,.csv,.md,.txt,application/json,text/csv,text/plain,text/markdown" hidden />
+        <button id="exportCustom" class="primary-button">↓ Скачать custom-spells.json</button>
+        <button id="clearDraft" class="secondary-button">Очистить черновик</button>
+      </div>
+      <div class="admin-footer">
+        <span id="draftCount">В черновике: 0 заклинаний</span>
+        <span id="adminStatus">Поддерживаются JSON, CSV, Markdown и TXT.</span>
+      </div>
+      <details class="format-help">
+        <summary>Формат файла для импорта</summary>
+        <p>Для JSON используй массив объектов или объект вида <code>{ "spells": [...] }</code>. У записи желательно указать <code>name</code>, <code>level</code> (0–9), <code>school</code>, <code>classes</code> и <code>description</code>. Поддерживаются также названия полей на русском: «Название», «Уровень», «Школа», «Классы», «Описание».</p>
+        <a href="./example-spells.json" target="_blank" rel="noopener">Посмотреть пример JSON</a>
+      </details>
+    </section>
+
+    <footer class="footer">
+      <span>SRD 5.1 / 5.2 © Wizards of the Coast LLC · CC BY 4.0 · API 5e-bits.</span>
+      <span><a href="https://www.dnd.su/spells/" target="_blank" rel="noopener">Каталог DnD.su ↗</a> · <a href="https://docs.dnd5eapi.co/" target="_blank" rel="noopener">Документация API ↗</a></span>
+    </footer>
+  </div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
