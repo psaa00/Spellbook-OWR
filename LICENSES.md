@@ -14,3 +14,9 @@ The built-in spell catalog is retrieved from the D&D 5e SRD API (`https://www.dn
 - API documentation: https://docs.dnd5eapi.co/
 
 This extension does not bundle the full Player's Handbook spell catalog or scrape DnD.su.
+
+## Переводы SRD
+
+Переводы текстов заклинаний, подготовленные для этого расширения, создаются независимо по англоязычным материалам SRD 5.1 / SRD 5.2. Указание `nameRu`, `descriptionRu` и `higherLevelRu` обозначает адаптированный перевод, а не копирование переводов стороннего сайта. DnD.su может использоваться для сверки русскоязычной терминологии и названий; его текстовые описания не импортируются и не считаются автоматически открыто лицензированными.
+
+При распространении адаптированного SRD-контента необходимо сохранять атрибуцию Wizards of the Coast LLC, ссылку на соответствующую версию SRD и Creative Commons Attribution 4.0 International (CC BY 4.0), а также отмечать, что текст переведён/изменён. Официальные сведения и формулировки атрибуции: https://www.dndbeyond.com/srd

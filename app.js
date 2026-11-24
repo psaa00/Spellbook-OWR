@@ -1,7 +1,7 @@
 const API_ROOT = "https://www.dnd5eapi.co/api";
 const SDK_URL = "https://esm.sh/@owlbear-rodeo/sdk@3.1.0";
 const STORAGE_PREFIX = "obr-spellbook:v1";
-const SRD_CACHE_SCHEMA = "v2";
+const SRD_CACHE_SCHEMA = "v3";
 const CUSTOM_URL = new URL("./custom-spells.json", import.meta.url).href;
 
 const el = (id) => document.getElementById(id);
@@ -151,11 +151,11 @@ function inferDamageTypeNear(text, start, end) {
 function extractDamageProfilesFromText(value) {
   const text = textValue(value);
   if (!text) return [];
-  const dicePattern = /(?:\d{1,3})?d\d{1,4}(?:\s*[+-]\s*\d{1,5})*/gi;
+  const dicePattern = /(?:\d{1,3})?[dк]\d{1,4}(?:\s*[+-]\s*\d{1,5})*/gi;
   const damageWord = /урон|поврежден|damage|damages|damaging|наносит|получает|takes|deals/i;
   const profiles = [];
   for (const match of text.matchAll(dicePattern)) {
-    const formula = match[0].replace(/\s+/g, "");
+    const formula = match[0].replace(/\s+/g, "").replace(/[кК]/g, "d");
     const start = Math.max(0, match.index - 55);
     const end = Math.min(text.length, match.index + match[0].length + 75);
     const context = text.slice(start, end);
@@ -183,10 +183,48 @@ function extractDamageProfilesFromText(value) {
   }
   return profiles;
 }
+function extractHealingProfileFromText(value, higherLevel = "", spellLevel = 1) {
+  const text = `${textValue(value)}\n${textValue(higherLevel)}`;
+  if (!text.trim()) return null;
+  const dicePattern = /(?:\d{1,3})?[dк]\d{1,4}(?:\s*[+-]\s*\d{1,5})*/gi;
+  const healWord = /heal(?:s|ed|ing)?|restor(?:e|es|ed|ing)|regain(?:s|ed)?|hit points?|hp|исцел|лечит|лечение|восстанов(?:ить|ит|ление|ливает)|хит(?:ы|ов)?/i;
+  let baseFormula = "";
+  let includesAbilityModifier = /spellcasting ability modifier|ability modifier|модификатор (?:вашей |своей )?(?:базовой )?характеристик/i.test(text);
+  for (const match of text.matchAll(dicePattern)) {
+    const start = Math.max(0, match.index - 100);
+    const end = Math.min(text.length, match.index + match[0].length + 110);
+    const context = text.slice(start, end);
+    if (!healWord.test(context)) continue;
+    // Avoid damage formulas that happen to be mentioned near a healing effect.
+    if (/damage|takes?\s+\d|deals?\s+\d|урон(?:а|у)?\s+\d|получает\s+\d/i.test(context) && !/healing|heal|regain|hit points restored|исцел|леч|восстанов/i.test(context)) continue;
+    baseFormula = match[0].replace(/\s+/g, "").replace(/[кК]/g, "d");
+    if (/spellcasting ability modifier|ability modifier|модификатор (?:вашей |своей )?(?:базовой )?характеристик/i.test(context)) includesAbilityModifier = true;
+    break;
+  }
+  if (!baseFormula) return null;
+  const atSlotLevel = {};
+  const higher = textValue(higherLevel);
+  const increaseMatch = higher.match(/(?:healing|hit points?|restores?|regains?|лечени\w*|восстанов\w*).{0,100}?(?:increases?|increase|increased|increasing|increases by|увеличива\w*).{0,45}?((?:\d+)?d\d+).{0,100}?(?:for each|per|за каждый|за каждый уровень).{0,50}?(?:spell )?slot level.{0,30}?(?:above|выше|сверх).{0,20}?(\d+)/i)
+    || higher.match(/((?:\d+)?d\d+).{0,100}?(?:for each|per|за каждый).{0,40}?(?:spell )?slot level.{0,30}?(?:above|выше|сверх).{0,20}?(\d+)/i);
+  if (increaseMatch) {
+    const baseLevel = Math.max(1, Number(increaseMatch[2]) || Number(spellLevel) || 1);
+    const baseDice = baseFormula.match(/^(\d*)d(\d+)$/i);
+    const incrementDice = increaseMatch[1].match(/^(\d*)d(\d+)$/i);
+    if (baseDice && incrementDice && Number(baseDice[2]) === Number(incrementDice[2])) {
+      const baseCount = Number(baseDice[1] || 1);
+      const incrementCount = Number(incrementDice[1] || 1);
+      for (let level = baseLevel; level <= 9; level += 1) {
+        atSlotLevel[level] = `${baseCount + (level - baseLevel) * incrementCount}d${baseDice[2]}`;
+      }
+    }
+  }
+  return { formula: baseFormula, atSlotLevel, atCharacterLevel: {}, includesAbilityModifier, inferredFromDescription: true };
+}
+
 function firstDiceFormula(value) {
   const text = textValue(value).trim();
-  const match = text.match(/(?:\d{1,3})?d\d{1,4}(?:\s*[+-]\s*\d{1,5})*/i);
-  return match ? match[0].replace(/\s+/g, "") : "";
+  const match = text.match(/(?:\d{1,3})?[dк]\d{1,4}(?:\s*[+-]\s*\d{1,5})*/i);
+  return match ? match[0].replace(/\s+/g, "").replace(/[кК]/g, "d") : "";
 }
 function normaliseSpell(raw, index = 0, source = "Пользовательская библиотека") {
   if (!raw || typeof raw !== "object") return null;
@@ -212,6 +250,30 @@ function normaliseSpell(raw, index = 0, source = "Пользовательска
   const damageType = textValue(getObjectName(pickField(raw, "damageType", "damage_type")));
   if (!damageProfiles.length && (damageFormula || Object.keys(damageAtSlotLevel).length || Object.keys(damageAtCharacterLevel).length)) {
     damageProfiles.push({ type: damageType || inferDamageType(`${textValue(explicitDamageValue)} ${textValue(desc)}`), formula: damageFormula, atSlotLevel: damageAtSlotLevel, atCharacterLevel: damageAtCharacterLevel });
+  }
+  // SRD API uses heal_at_slot_level for healing spells. Keep healing profiles
+  // separate from damage so a cure spell never displays as damage.
+  const rawHealing = pickField(raw, "healing", "heal");
+  const explicitHealingValue = pickField(raw, "healingFormula", "healing_formula", "healFormula", "heal_formula", "healing_dice", "heal_dice", "Формула исцеления", "Исцеление")
+    ?? rawHealing?.heal_at_slot_level ?? (typeof rawHealing === "string" ? rawHealing : "");
+  const healingFormula = firstDiceFormula(explicitHealingValue);
+  const healingAtSlotLevel = normaliseDamageMap(pickField(raw, "healingAtSlotLevel", "healing_at_slot_level", "healAtSlotLevel", "heal_at_slot_level") ?? rawHealing?.heal_at_slot_level);
+  const healingAtCharacterLevel = normaliseDamageMap(pickField(raw, "healingAtCharacterLevel", "healing_at_character_level", "healAtCharacterLevel", "heal_at_character_level") ?? rawHealing?.heal_at_character_level);
+  const healingIncludesAbilityModifier = parseBoolean(pickField(raw, "healingIncludesAbilityModifier", "healing_includes_ability_modifier", "healingModifier", "healing_modifier"))
+    || /spellcasting ability modifier|ability modifier|модификатор (?:вашей |своей )?(?:базовой )?характеристик/i.test(`${textValue(desc)} ${textValue(explicitHealingValue)}`);
+  const healingProfilesValue = pickField(raw, "healingProfiles", "healing_profiles");
+  const healingProfiles = (Array.isArray(healingProfilesValue) ? healingProfilesValue : []).map((entry) => ({
+    formula: firstDiceFormula(entry?.formula ?? entry?.healing_dice ?? entry?.heal_dice ?? ""),
+    atSlotLevel: normaliseDamageMap(entry?.atSlotLevel ?? entry?.heal_at_slot_level ?? entry?.healing_at_slot_level),
+    atCharacterLevel: normaliseDamageMap(entry?.atCharacterLevel ?? entry?.healing_at_character_level),
+    includesAbilityModifier: parseBoolean(entry?.includesAbilityModifier ?? entry?.includes_ability_modifier),
+  })).filter((profile) => profile.formula || Object.keys(profile.atSlotLevel).length || Object.keys(profile.atCharacterLevel).length);
+  if (!healingProfiles.length && (healingFormula || Object.keys(healingAtSlotLevel).length || Object.keys(healingAtCharacterLevel).length)) {
+    healingProfiles.push({ formula: healingFormula, atSlotLevel: healingAtSlotLevel, atCharacterLevel: healingAtCharacterLevel, includesAbilityModifier: healingIncludesAbilityModifier });
+  }
+  if (!healingProfiles.length) {
+    const inferredHealing = extractHealingProfileFromText(desc, pickField(raw, "higherLevel", "higher_level", "На высоких уровнях") ?? "", parseLevel(pickField(raw, "level", "Уровень")) || 1);
+    if (inferredHealing) healingProfiles.push(inferredHealing);
   }
   if (explicitDamageValue && typeof explicitDamageValue === "string") {
     const explicitTextProfiles = extractDamageProfilesFromText(explicitDamageValue);
@@ -242,6 +304,15 @@ function normaliseSpell(raw, index = 0, source = "Пользовательска
     damageAtCharacterLevel,
     damageType,
     damageProfiles,
+    healingFormula,
+    healingAtSlotLevel,
+    healingAtCharacterLevel,
+    healingIncludesAbilityModifier,
+    healingProfiles,
+    // Optional Russian localization overlay fields for independently translated SRD content.
+    nameRu: textValue(pickField(raw, "nameRu", "name_ru", "Название RU")),
+    descriptionRu: textValue(pickField(raw, "descriptionRu", "description_ru", "Описание RU")),
+    higherLevelRu: textValue(pickField(raw, "higherLevelRu", "higher_level_ru", "На высоких уровнях RU")),
     source: textValue(pickField(raw, "source", "sourceName", "Источник")) || source,
     sourceUrl: safeHttpUrl(textValue(pickField(raw, "sourceUrl", "url"))),
     origin: pickField(raw, "origin") || "custom",
@@ -260,6 +331,9 @@ function normaliseSrdSpell(raw, year) {
   item.school = niceSchool(getObjectName(raw.school));
   return item;
 }
+function spellDisplayName(spell) { return spell?.nameRu || spell?.name || "Без названия"; }
+function spellDisplayDescription(spell) { return spell?.descriptionRu || spell?.description || ""; }
+function spellDisplayHigherLevel(spell) { return spell?.higherLevelRu || spell?.higherLevel || ""; }
 function uniqueMerge(...groups) {
   const map = new Map();
   for (const group of groups) {
@@ -367,7 +441,7 @@ async function connectToOwlbear() {
       state.unsubscribeRolls?.();
       state.unsubscribeRolls = OBR.broadcast.onMessage(ROLL_CHANNEL, (event) => {
         const roll = event?.data;
-        if (!roll || roll.kind !== "spell-damage-roll" || typeof roll.total !== "number") return;
+        if (!roll || !["spell-damage-roll", "spell-healing-roll"].includes(roll.kind) || typeof roll.total !== "number") return;
         addRoomRoll({ ...roll, remote: true });
       });
     }
@@ -438,8 +512,8 @@ async function loadSrd(year, force = false) {
   el("refreshSrd").disabled = true;
   el("refreshSrd").classList.add("spinning");
   const cached = localGet(`srd-${year}-${SRD_CACHE_SCHEMA}`);
-  const cacheHasDamageSchema = cached && Array.isArray(cached.spells) && cached.spells.every((spell) => Object.prototype.hasOwnProperty.call(spell || {}, "damageProfiles"));
-  const cacheIsFresh = cached && Array.isArray(cached.spells) && cacheHasDamageSchema && Date.now() - cached.savedAt < 7 * 24 * 60 * 60 * 1000;
+  const cacheHasCurrentSchema = cached && Array.isArray(cached.spells) && cached.spells.every((spell) => Object.prototype.hasOwnProperty.call(spell || {}, "damageProfiles") && Object.prototype.hasOwnProperty.call(spell || {}, "healingProfiles"));
+  const cacheIsFresh = cached && Array.isArray(cached.spells) && cacheHasCurrentSchema && Date.now() - cached.savedAt < 7 * 24 * 60 * 60 * 1000;
   if (!force && cacheIsFresh) {
     state.srd = cached.spells;
     state.loading = false;
@@ -520,16 +594,20 @@ function parseMarkdown(text, filename) {
     const spell = { name: matches[i][1].trim(), source: "Импортированный Markdown" };
     const body = [];
     for (const line of lines) {
-      const match = line.match(/^\s*(Уровень|Level|Школа|School|Классы|Класс|Classes|Class|Время накладывания|Время сотворения|Casting time|Дальность|Дистанция|Range|Длительность|Duration|Компоненты|Components|Урон|Формула урона|Damage)\s*:\s*(.*)$/i);
+      const match = line.match(/^\s*(Уровень|Level|Школа|School|Классы|Класс|Classes|Class|Время накладывания|Время сотворения|Casting time|Дальность|Дистанция|Range|Длительность|Duration|Компоненты|Components|Урон|Формула урона|Damage|Исцеление|Лечение|Формула исцеления|Healing|Название RU|Описание RU|На высоких уровнях RU)\s*:\s*(.*)$/i);
       if (!match) { body.push(line); continue; }
       const key = match[1].toLowerCase(); const value = match[2].trim();
-      if (key.includes("уров") || key === "level") spell.level = value;
+      if (key === "название ru") spell.nameRu = value;
+      else if (key === "описание ru") spell.descriptionRu = value;
+      else if (key === "на высоких уровнях ru") spell.higherLevelRu = value;
+      else if (key.includes("уров") || key === "level") spell.level = value;
       else if (key.includes("школ") || key === "school") spell.school = value;
       else if (key.includes("класс") || key === "class" || key === "classes") spell.classes = value;
       else if (key.includes("время") || key === "casting time") spell.castingTime = value;
       else if (key.includes("даль") || key.includes("дистан") || key === "range") spell.range = value;
       else if (key.includes("длитель") || key === "duration") spell.duration = value;
       else if (key.includes("компон") || key === "components") spell.components = value;
+      else if (key.includes("исцел") || key.includes("леч") || key === "healing") spell.healingFormula = value;
       else if (key.includes("урон") || key === "damage") spell.damageFormula = value;
     }
     spell.description = body.join("\n").replace(/^\s*Описание\s*:?\s*/i, "").trim();
@@ -606,7 +684,7 @@ function clearDraft() {
 }
 
 function parseDiceFormula(formula) {
-  const input = String(formula || "").replace(/\s+/g, "").toLowerCase();
+  const input = String(formula || "").replace(/\s+/g, "").replace(/[кК]/g, "d").toLowerCase();
   if (!input || input.length > 120) throw new Error("Пустая или слишком длинная формула.");
   let cursor = 0;
   let sign = 1;
@@ -683,49 +761,58 @@ function renderRoomRolls() {
   list.replaceChildren();
   for (const roll of state.roomRolls) {
     const item = document.createElement("article"); item.className = "roll-entry";
-    const title = document.createElement("strong"); title.textContent = `${roll.spellName || "Бросок урона"} · ${roll.formula}`;
+    const rollLabel = roll.kind === "spell-healing-roll" ? "Исцеление" : "Урон";
+    const title = document.createElement("strong"); title.textContent = `${roll.spellName || "Заклинание"} · ${rollLabel} · ${roll.formula}`;
     const result = document.createElement("div"); result.className = "roll-entry-result"; result.textContent = `${roll.details || ""}`;
     const meta = document.createElement("div"); meta.className = "roll-entry-meta";
     const who = roll.remote ? "Бросок участника комнаты" : "Ваш бросок";
-    meta.textContent = `${who}${roll.damageType ? ` · ${roll.damageType}` : ""}`;
+    meta.textContent = `${who}${roll.damageType ? ` · ${roll.damageType}` : roll.kind === "spell-healing-roll" ? " · восстановление хитов" : ""}`;
     item.append(title, result, meta); list.append(item);
   }
 }
-async function performSpellDamageRoll(spell, formula) {
+async function performSpellDamageRoll(spell, formula, rollKind = "spell-damage-roll") {
   try {
     const result = rollDiceFormula(formula);
     const roll = {
-      kind: "spell-damage-roll",
-      spellName: spell.name,
+      kind: rollKind,
+      spellName: spellDisplayName(spell),
       formula: result.formula,
       total: result.total,
       details: result.details,
-      damageType: spell.damageType || "",
+      damageType: rollKind === "spell-healing-roll" ? "" : (spell.damageType || ""),
       timestamp: Date.now(),
     };
     addRoomRoll(roll);
     if (state.OBR?.notification?.show) {
-      try { await state.OBR.notification.show(`${spell.name}: ${result.details}`, "SUCCESS"); } catch { /* уведомление не должно ломать бросок */ }
+      try { await state.OBR.notification.show(`${spellDisplayName(spell)} · ${rollKind === "spell-healing-roll" ? "Исцеление" : "Урон"}: ${result.details}`, "SUCCESS"); } catch { /* уведомление не должно ломать бросок */ }
     }
     if (state.OBR?.isAvailable && state.roomId) {
       try {
         await sendRoomRoll(state.OBR, roll);
-        setNotice(`Бросок «${spell.name}»: ${result.total}. Результат отправлен участникам комнаты.`, "success");
+        setNotice(`${rollKind === "spell-healing-roll" ? "Исцеление" : "Урон"} «${spellDisplayName(spell)}»: ${result.total}. Результат отправлен участникам комнаты.`, "success");
       } catch (error) {
         console.warn("Spellbook could not broadcast roll", error);
         setNotice(`Бросок рассчитан: ${result.total}. Не удалось отправить его участникам: ${error?.message || error}. Проверь подключение к комнате.`, "error");
       }
     } else {
-      setNotice(`Бросок «${spell.name}»: ${result.total}. Ты вне игровой комнаты, поэтому результат виден только здесь.`, "success");
+      setNotice(`${rollKind === "spell-healing-roll" ? "Исцеление" : "Урон"} «${spellDisplayName(spell)}»: ${result.total}. Ты вне игровой комнаты, поэтому результат виден только здесь.`, "success");
     }
   } catch (error) {
     setNotice(`Не удалось бросить кости: ${error.message}`, "error");
   }
 }
-function addDamageRollSection(parent, spell) {
-  const profiles = Array.isArray(spell.damageProfiles) ? spell.damageProfiles.filter(Boolean) : [];
+function addSpellRollSection(parent, spell, mode = "damage") {
+  const healing = mode === "healing";
+  const profiles = healing
+    ? (Array.isArray(spell.healingProfiles) ? spell.healingProfiles.filter(Boolean) : [])
+    : (Array.isArray(spell.damageProfiles) ? spell.damageProfiles.filter(Boolean) : []);
   if (!profiles.length) {
-    const fallback = {
+    const fallback = healing ? {
+      formula: spell.healingFormula || "",
+      atSlotLevel: spell.healingAtSlotLevel || {},
+      atCharacterLevel: spell.healingAtCharacterLevel || {},
+      includesAbilityModifier: spell.healingIncludesAbilityModifier,
+    } : {
       type: spell.damageType || "",
       formula: spell.damageFormula || "",
       atSlotLevel: spell.damageAtSlotLevel || {},
@@ -735,12 +822,12 @@ function addDamageRollSection(parent, spell) {
   }
   if (!profiles.length) return;
 
-  const section = document.createElement("section"); section.className = "detail-section damage-section";
-  const heading = document.createElement("h3"); heading.textContent = "Бросок урона";
+  const section = document.createElement("section"); section.className = `detail-section damage-section ${healing ? "healing-section" : ""}`.trim();
+  const heading = document.createElement("h3"); heading.textContent = healing ? "Бросок исцеления" : "Бросок урона";
   const description = document.createElement("p"); description.className = "damage-hint";
   description.textContent = profiles.some((profile) => profile.inferredFromDescription)
-    ? "Формулы распознаны из текста описания автоматически — проверь их перед броском. Результаты отправляются участникам комнаты."
-    : "Результат рассчитывается без анимации и отправляется участникам комнаты.";
+    ? `Формулы ${healing ? "исцеления" : "урона"} распознаны из текста описания автоматически — проверь их перед броском. Результаты отправляются участникам комнаты.`
+    : `Результат ${healing ? "исцеления" : "урона"} рассчитывается без анимации и отправляется участникам комнаты.`;
   section.append(heading, description);
 
   profiles.forEach((profile, index) => {
@@ -748,11 +835,26 @@ function addDamageRollSection(parent, spell) {
     const characterEntries = Object.entries(profile.atCharacterLevel || {}).sort((a, b) => Number(a[0]) - Number(b[0]));
     const formulaText = profile.formula || "";
     const profileWrap = document.createElement("div"); profileWrap.className = "damage-profile";
-    if (profiles.length > 1 || profile.type) {
+    if (!healing && (profiles.length > 1 || profile.type)) {
       const profileTitle = document.createElement("div"); profileTitle.className = "damage-profile-title";
       profileTitle.textContent = profile.type ? `Урон: ${profile.type}` : `Вариант урона ${index + 1}`;
       profileWrap.append(profileTitle);
     }
+
+    const needsAbilityMod = healing && (profile.includesAbilityModifier || spell.healingIncludesAbilityModifier);
+    let modifierInput = null;
+    if (needsAbilityMod) {
+      const modifierLabel = document.createElement("label"); modifierLabel.className = "damage-level-label healing-modifier-label";
+      modifierLabel.textContent = "Модификатор заклинательной характеристики";
+      modifierInput = document.createElement("input"); modifierInput.type = "number"; modifierInput.min = "-10"; modifierInput.max = "20"; modifierInput.step = "1"; modifierInput.value = "0"; modifierInput.className = "damage-level-select healing-modifier-input";
+      modifierLabel.append(modifierInput); profileWrap.append(modifierLabel);
+    }
+    const withModifier = (formula) => {
+      if (!needsAbilityMod || !modifierInput) return formula;
+      const modifier = Number(modifierInput.value || 0);
+      return modifier === 0 ? formula : `${formula}${modifier > 0 ? "+" : ""}${modifier}`;
+    };
+    const roll = (formula, type = "") => performSpellDamageRoll({ ...spell, damageType: type || spell.damageType }, withModifier(formula), healing ? "spell-healing-roll" : "spell-damage-roll");
 
     if (slotEntries.length) {
       const row = document.createElement("div"); row.className = "damage-roll-controls";
@@ -765,9 +867,9 @@ function addDamageRollSection(parent, spell) {
       if (slotEntries.some(([level]) => level === defaultLevel)) select.value = defaultLevel;
       const rollButton = document.createElement("button"); rollButton.className = "damage-roll-button";
       let selectedFormula = profile.atSlotLevel[select.value];
-      const updateButton = () => { selectedFormula = profile.atSlotLevel[select.value]; rollButton.textContent = `🎲 Бросить ${selectedFormula}`; };
-      updateButton(); select.addEventListener("change", updateButton);
-      rollButton.addEventListener("click", () => performSpellDamageRoll({ ...spell, damageType: profile.type || spell.damageType }, selectedFormula));
+      const updateButton = () => { selectedFormula = profile.atSlotLevel[select.value]; rollButton.textContent = `🎲 Бросить ${withModifier(selectedFormula)}`; };
+      updateButton(); select.addEventListener("change", updateButton); modifierInput?.addEventListener("input", updateButton);
+      rollButton.addEventListener("click", () => roll(selectedFormula, profile.type || ""));
       label.append(select); row.append(label, rollButton); profileWrap.append(row);
     } else if (characterEntries.length) {
       const row = document.createElement("div"); row.className = "damage-roll-controls";
@@ -778,21 +880,24 @@ function addDamageRollSection(parent, spell) {
       });
       const rollButton = document.createElement("button"); rollButton.className = "damage-roll-button";
       let selectedFormula = profile.atCharacterLevel[select.value];
-      const updateButton = () => { selectedFormula = profile.atCharacterLevel[select.value]; rollButton.textContent = `🎲 Бросить ${selectedFormula}`; };
-      updateButton(); select.addEventListener("change", updateButton);
-      rollButton.addEventListener("click", () => performSpellDamageRoll({ ...spell, damageType: profile.type || spell.damageType }, selectedFormula));
+      const updateButton = () => { selectedFormula = profile.atCharacterLevel[select.value]; rollButton.textContent = `🎲 Бросить ${withModifier(selectedFormula)}`; };
+      updateButton(); select.addEventListener("change", updateButton); modifierInput?.addEventListener("input", updateButton);
+      rollButton.addEventListener("click", () => roll(selectedFormula, profile.type || ""));
       label.append(select); row.append(label, rollButton); profileWrap.append(row);
     } else if (formulaText) {
-      const match = formulaText.match(/\d*d\d+(?:\s*[+-]\s*(?:\d*d\d+|\d+))*/i);
+      const match = formulaText.match(/(?:\d*d\d+)(?:\s*[+-]\s*(?:\d*d\d+|\d+))*/i);
       if (!match) return;
-      const button = document.createElement("button"); button.className = "damage-roll-button"; button.textContent = `🎲 Бросить ${match[0]}`;
-      button.addEventListener("click", () => performSpellDamageRoll({ ...spell, damageType: profile.type || spell.damageType }, match[0]));
+      const button = document.createElement("button"); button.className = "damage-roll-button"; button.textContent = `🎲 Бросить ${withModifier(match[0])}`;
+      modifierInput?.addEventListener("input", () => { button.textContent = `🎲 Бросить ${withModifier(match[0])}`; });
+      button.addEventListener("click", () => roll(match[0], profile.type || ""));
       profileWrap.append(button);
     }
     section.append(profileWrap);
   });
   parent.append(section);
 }
+function addDamageRollSection(parent, spell) { addSpellRollSection(parent, spell, "damage"); }
+function addHealingRollSection(parent, spell) { addSpellRollSection(parent, spell, "healing"); }
 function levelText(level) { return level === 0 ? "Заговор" : `${level}-й уровень`; }
 function populateFilters(spells) {
   const level = el("levelFilter"), cls = el("classFilter"), school = el("schoolFilter");
@@ -822,7 +927,7 @@ function getFiltered() {
     if (cls && !(spell.classes || []).includes(cls)) return false;
     if (school && spell.school !== school) return false;
     if (query) {
-      const haystack = `${spell.name} ${spell.description} ${spell.school} ${(spell.classes || []).join(" ")}`.toLocaleLowerCase("ru");
+      const haystack = `${spell.name} ${spell.nameRu || ""} ${spell.description} ${spell.descriptionRu || ""} ${spell.school} ${(spell.classes || []).join(" ")}`.toLocaleLowerCase("ru");
       if (!haystack.includes(query)) return false;
     }
     return true;
@@ -861,7 +966,7 @@ function renderList() {
     badge.className = `level-badge${spell.level === 0 ? " cantrip" : ""}`;
     badge.textContent = spell.level === 0 ? "✧" : String(spell.level);
     const main = document.createElement("span"); main.className = "row-main";
-    const name = document.createElement("span"); name.className = "row-name"; name.textContent = spell.name;
+    const name = document.createElement("span"); name.className = "row-name"; name.textContent = spellDisplayName(spell);
     const meta = document.createElement("span"); meta.className = "row-meta";
     const school = document.createElement("span"); school.textContent = niceSchool(spell.school);
     const sep = document.createElement("span"); sep.className = "meta-sep"; sep.textContent = "·";
@@ -911,7 +1016,7 @@ function renderDetail(spell) {
   const source = document.createElement("span"); source.className = "detail-source"; source.textContent = spell.source || "Библиотека заклинаний";
   const badge = document.createElement("span"); badge.className = "pill gold"; badge.textContent = levelText(spell.level);
   top.append(source, badge);
-  const title = document.createElement("h2"); title.className = "detail-title"; title.textContent = spell.name;
+  const title = document.createElement("h2"); title.className = "detail-title"; title.textContent = spellDisplayName(spell);
   const sub = document.createElement("div"); sub.className = "detail-subtitle";
   const school = document.createElement("span"); school.className = "pill"; school.textContent = niceSchool(spell.school);
   sub.append(school);
@@ -924,6 +1029,7 @@ function renderDetail(spell) {
   addStat(stats, "Длительность", spell.duration + (spell.concentration ? " (концентрация)" : ""));
   wrap.append(top, title, sub, stats);
   addDamageRollSection(wrap, spell);
+  addHealingRollSection(wrap, spell);
   if (spell.classes?.length) {
     const sec = document.createElement("section"); sec.className = "detail-section";
     const h = document.createElement("h3"); h.textContent = "Доступно классам";
@@ -931,8 +1037,8 @@ function renderDetail(spell) {
     spell.classes.forEach((x) => { const chip = document.createElement("span"); chip.className = "class-chip"; chip.textContent = x; chips.append(chip); });
     sec.append(h, chips); wrap.append(sec);
   }
-  addDetailSection(wrap, "Описание", spell.description);
-  addDetailSection(wrap, "На более высоких уровнях", spell.higherLevel);
+  addDetailSection(wrap, "Описание", spellDisplayDescription(spell));
+  addDetailSection(wrap, "На более высоких уровнях", spellDisplayHigherLevel(spell));
   const safeSourceUrl = safeHttpUrl(spell.sourceUrl);
   if (safeSourceUrl) {
     const link = document.createElement("a"); link.className = "detail-link"; link.href = safeSourceUrl; link.target = "_blank"; link.rel = "noopener"; link.textContent = "Открыть источник заклинания ↗"; wrap.append(link);

@@ -40,6 +40,79 @@
       "damageType": "огонь",
       "description": "Тестовая запись для проверки кнопки броска урона. При нажатии кнопки расширение бросит 1d10.",
       "source": "Пример / Homebrew"
+    },
+    {
+      "id": "example-healing-word",
+      "name": "Healing Word",
+      "nameRu": "Лечащее слово",
+      "level": 1,
+      "school": "воплощение",
+      "classes": [
+        "бард",
+        "жрец",
+        "друид"
+      ],
+      "castingTime": "1 бонусное действие",
+      "range": "60 футов",
+      "components": [
+        "В"
+      ],
+      "duration": "Мгновенная",
+      "description": "A creature of your choice that you can see within range regains hit points equal to 1d4 + your spellcasting ability modifier. This spell has no effect on undead or constructs.",
+      "descriptionRu": "Существо по вашему выбору, которое вы видите в пределах дистанции, восстанавливает хиты в количестве 1к4 + ваш модификатор заклинательной характеристики. Это заклинание не действует на нежить и конструктов.",
+      "higherLevel": "When you cast this spell using a spell slot of 2nd level or higher, the healing increases by 1d4 for each slot level above 1st.",
+      "healingFormula": "1d4",
+      "healingAtSlotLevel": {
+        "1": "1d4",
+        "2": "2d4",
+        "3": "3d4",
+        "4": "4d4",
+        "5": "5d4",
+        "6": "6d4",
+        "7": "7d4",
+        "8": "8d4",
+        "9": "9d4"
+      },
+      "healingIncludesAbilityModifier": true,
+      "source": "SRD 5.1 · CC BY 4.0 · example localization"
+    },
+    {
+      "id": "example-cure-wounds",
+      "name": "Cure Wounds",
+      "nameRu": "Лечение ран",
+      "level": 1,
+      "school": "воплощение",
+      "classes": [
+        "бард",
+        "жрец",
+        "друид",
+        "паладин",
+        "следопыт"
+      ],
+      "castingTime": "1 действие",
+      "range": "Касание",
+      "components": [
+        "В",
+        "С"
+      ],
+      "duration": "Мгновенная",
+      "description": "A creature you touch regains hit points equal to 1d8 + your spellcasting ability modifier. This spell has no effect on undead or constructs.",
+      "descriptionRu": "Существо, которого вы касаетесь, восстанавливает хиты в количестве 1к8 + ваш модификатор заклинательной характеристики. Это заклинание не действует на нежить и конструктов.",
+      "higherLevel": "When you cast this spell using a spell slot of 2nd level or higher, the healing increases by 1d8 for each slot level above 1st.",
+      "healingFormula": "1d8",
+      "healingAtSlotLevel": {
+        "1": "1d8",
+        "2": "2d8",
+        "3": "3d8",
+        "4": "4d8",
+        "5": "5d8",
+        "6": "6d8",
+        "7": "7d8",
+        "8": "8d8",
+        "9": "9d8"
+      },
+      "healingIncludesAbilityModifier": true,
+      "source": "SRD 5.1 · CC BY 4.0 · example localization"
     }
   ]
 }

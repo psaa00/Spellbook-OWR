@@ -173,3 +173,11 @@ kbd { color:#8491a3; border:1px solid #425064; border-radius:4px; padding:2px 5p
 
 .damage-profile + .damage-profile { margin-top:10px; padding-top:10px; border-top:1px solid var(--line-soft); }
 .damage-profile-title { color:#d9c28f; font-size:10px; font-weight:800; margin-bottom:7px; }
+
+/* Healing rolls share the same dice controls, with a distinct restorative accent. */
+.healing-section { border-color: rgba(112, 173, 137, .34); background: rgba(63, 126, 91, .08); }
+.healing-section h3 { color: #a9d9b7; }
+.healing-section .damage-roll-button { border-color: #649b75; background: linear-gradient(135deg,#315d43,#294936); color: #e3f7e8; }
+.healing-section .damage-roll-button:hover { background: linear-gradient(135deg,#3b704f,#31563f); }
+.healing-modifier-label { margin: 0 0 8px; max-width: 220px; }
+.healing-modifier-input { width: 100%; }

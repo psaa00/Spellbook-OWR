@@ -96,7 +96,7 @@
 
     <section id="rollHistoryPanel" class="roll-history-panel" hidden aria-live="polite">
       <div class="roll-history-heading">
-        <div><span class="eyebrow">ИГРОВОЙ ЖУРНАЛ</span><h2>Броски урона</h2></div>
+        <div><span class="eyebrow">ИГРОВОЙ ЖУРНАЛ</span><h2>Броски заклинаний</h2></div>
         <span class="roll-history-note">Последние результаты в комнате</span>
       </div>
       <div id="rollHistory" class="roll-history-list"></div>
@@ -123,7 +123,7 @@
       </div>
       <details class="format-help">
         <summary>Формат файла для импорта</summary>
-        <p>Для JSON используй массив объектов или объект вида <code>{ "spells": [...] }</code>. У записи желательно указать <code>name</code>, <code>level</code> (0–9), <code>school</code>, <code>classes</code> и <code>description</code>. Для броска урона добавь <code>damage</code> или <code>damageFormula</code>, например <code>"2d6+3"</code>. Поддерживаются также названия полей на русском, включая «Урон».</p>
+        <p>Для JSON используй массив объектов или объект вида <code>{ "spells": [...] }</code>. Укажи <code>name</code>, <code>level</code>, <code>school</code>, <code>classes</code> и <code>description</code>. Для броска урона используй <code>damageFormula</code>, а для лечения — <code>healingFormula</code> или <code>heal_at_slot_level</code>. Для учёта модификатора характеристики добавь <code>healingIncludesAbilityModifier: true</code>. Формулы поддерживают <code>d</code> и русскую запись <code>к</code> (например, <code>2к8+3</code>). Для своих переводов используй <code>nameRu</code>, <code>descriptionRu</code> и <code>higherLevelRu</code>.</p>
         <a href="./example-spells.json" target="_blank" rel="noopener">Посмотреть пример JSON</a>
       </details>
     </section>
