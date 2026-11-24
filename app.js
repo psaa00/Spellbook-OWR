@@ -16,7 +16,10 @@ const state = {
   visible: [],
   loading: false,
   loadGeneration: 0,
+  roomRolls: [],
+  unsubscribeRolls: null,
 };
+const ROLL_CHANNEL = "com.psaa00.spellbook/rolls";
 
 const SCHOOL_NAMES = {
   abjuration: "Ограждение", conjuration: "Вызов", divination: "Прорицание",
@@ -95,6 +98,12 @@ function parseLevel(value) {
   if (!match) return 0;
   return Math.max(0, Math.min(9, Number(match[0])));
 }
+function normaliseDamageMap(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value)
+    .map(([key, formula]) => [String(key), textValue(formula).trim()])
+    .filter(([, formula]) => formula));
+}
 function normaliseSpell(raw, index = 0, source = "Пользовательская библиотека") {
   if (!raw || typeof raw !== "object") return null;
   const name = textValue(raw.name ?? raw.title ?? raw["Название"] ?? raw["Заклинание"]).trim();
@@ -102,6 +111,22 @@ function normaliseSpell(raw, index = 0, source = "Пользовательска
   const rawSchool = getObjectName(raw.school ?? raw["Школа"]);
   const rawClasses = raw.classes ?? raw.class ?? raw["Классы"] ?? raw["Класс"] ?? [];
   const desc = raw.description ?? raw.desc ?? raw.text ?? raw["Описание"] ?? raw["Текст"] ?? "";
+  const rawDamage = raw.damage;
+  const rawDamageEntries = Array.isArray(rawDamage) ? rawDamage : (rawDamage && typeof rawDamage === "object" ? [rawDamage] : []);
+  const exportedProfiles = Array.isArray(raw.damageProfiles) ? raw.damageProfiles : [];
+  const damageProfiles = (exportedProfiles.length ? exportedProfiles : rawDamageEntries).map((entry) => ({
+    type: textValue(getObjectName(entry?.type ?? entry?.damage_type ?? entry?.damageType ?? "")),
+    formula: textValue(entry?.formula ?? "").trim(),
+    atSlotLevel: normaliseDamageMap(entry?.atSlotLevel ?? entry?.damage_at_slot_level ?? entry?.at_slot_level),
+    atCharacterLevel: normaliseDamageMap(entry?.atCharacterLevel ?? entry?.damage_at_character_level ?? entry?.at_character_level),
+  })).filter((profile) => profile.formula || Object.keys(profile.atSlotLevel).length || Object.keys(profile.atCharacterLevel).length);
+  const damageFormula = textValue(raw.damageFormula ?? raw.damage_formula ?? raw["Формула урона"] ?? raw["Урон"] ?? (typeof rawDamage === "string" ? rawDamage : "")).trim();
+  const damageAtSlotLevel = normaliseDamageMap(raw.damageAtSlotLevel ?? raw.damage_at_slot_level);
+  const damageAtCharacterLevel = normaliseDamageMap(raw.damageAtCharacterLevel ?? raw.damage_at_character_level);
+  const damageType = textValue(getObjectName(raw.damageType ?? raw.damage_type ?? ""));
+  if (!damageProfiles.length && (damageFormula || Object.keys(damageAtSlotLevel).length || Object.keys(damageAtCharacterLevel).length)) {
+    damageProfiles.push({ type: damageType, formula: damageFormula, atSlotLevel: damageAtSlotLevel, atCharacterLevel: damageAtCharacterLevel });
+  }
   const id = String(raw.id ?? raw.index ?? `custom-${slugify(name)}`);
   const spell = {
     id,
@@ -118,6 +143,11 @@ function normaliseSpell(raw, index = 0, source = "Пользовательска
     ritual: parseBoolean(raw.ritual ?? raw["Ритуал"]),
     description: textValue(desc),
     higherLevel: textValue(raw.higherLevel ?? raw.higher_level ?? raw["На высоких уровнях"]),
+    damageFormula,
+    damageAtSlotLevel,
+    damageAtCharacterLevel,
+    damageType,
+    damageProfiles,
     source: textValue(raw.source ?? raw.sourceName ?? raw["Источник"]) || source,
     sourceUrl: safeHttpUrl(textValue(raw.sourceUrl ?? raw.url)),
     origin: raw.origin || "custom",
@@ -190,6 +220,14 @@ async function connectToOwlbear() {
     }
     await waitForObrReady(OBR);
     state.role = await OBR.player.getRole();
+    if (OBR.broadcast?.onMessage) {
+      state.unsubscribeRolls?.();
+      state.unsubscribeRolls = OBR.broadcast.onMessage(ROLL_CHANNEL, (event) => {
+        const roll = event?.data;
+        if (!roll || roll.kind !== "spell-damage-roll" || typeof roll.total !== "number") return;
+        addRoomRoll({ ...roll, remote: true });
+      });
+    }
     if (state.role === "GM") {
       el("roleBadge").textContent = "МАСТЕР";
       el("roleBadge").classList.add("gm");
@@ -252,7 +290,8 @@ async function loadSrd(year, force = false) {
   el("refreshSrd").disabled = true;
   el("refreshSrd").classList.add("spinning");
   const cached = localGet(`srd-${year}`);
-  const cacheIsFresh = cached && Array.isArray(cached.spells) && Date.now() - cached.savedAt < 7 * 24 * 60 * 60 * 1000;
+  const cacheHasDamageSchema = cached && Array.isArray(cached.spells) && cached.spells.every((spell) => Object.prototype.hasOwnProperty.call(spell || {}, "damageProfiles"));
+  const cacheIsFresh = cached && Array.isArray(cached.spells) && cacheHasDamageSchema && Date.now() - cached.savedAt < 7 * 24 * 60 * 60 * 1000;
   if (!force && cacheIsFresh) {
     state.srd = cached.spells;
     state.loading = false;
@@ -333,7 +372,7 @@ function parseMarkdown(text, filename) {
     const spell = { name: matches[i][1].trim(), source: "Импортированный Markdown" };
     const body = [];
     for (const line of lines) {
-      const match = line.match(/^\s*(Уровень|Level|Школа|School|Классы|Класс|Classes|Class|Время накладывания|Время сотворения|Casting time|Дальность|Дистанция|Range|Длительность|Duration|Компоненты|Components)\s*:\s*(.*)$/i);
+      const match = line.match(/^\s*(Уровень|Level|Школа|School|Классы|Класс|Classes|Class|Время накладывания|Время сотворения|Casting time|Дальность|Дистанция|Range|Длительность|Duration|Компоненты|Components|Урон|Формула урона|Damage)\s*:\s*(.*)$/i);
       if (!match) { body.push(line); continue; }
       const key = match[1].toLowerCase(); const value = match[2].trim();
       if (key.includes("уров") || key === "level") spell.level = value;
@@ -343,6 +382,7 @@ function parseMarkdown(text, filename) {
       else if (key.includes("даль") || key.includes("дистан") || key === "range") spell.range = value;
       else if (key.includes("длитель") || key === "duration") spell.duration = value;
       else if (key.includes("компон") || key === "components") spell.components = value;
+      else if (key.includes("урон") || key === "damage") spell.damageFormula = value;
     }
     spell.description = body.join("\n").replace(/^\s*Описание\s*:?\s*/i, "").trim();
     blocks.push(spell);
@@ -417,6 +457,191 @@ function clearDraft() {
   setNotice("Черновик мастера очищен.", "success");
 }
 
+function parseDiceFormula(formula) {
+  const input = String(formula || "").replace(/\s+/g, "").toLowerCase();
+  if (!input || input.length > 120) throw new Error("Пустая или слишком длинная формула.");
+  let cursor = 0;
+  let sign = 1;
+  let totalDice = 0;
+  const groups = [];
+  let modifier = 0;
+  let hasTerm = false;
+  while (cursor < input.length) {
+    if (input[cursor] === "+") { sign = 1; cursor++; }
+    else if (input[cursor] === "-") { sign = -1; cursor++; }
+    else if (hasTerm) throw new Error("Проверь знаки между частями формулы.");
+    const rest = input.slice(cursor);
+    const diceMatch = rest.match(/^(\d*)d(\d+)/i);
+    if (diceMatch) {
+      const count = diceMatch[1] === "" ? 1 : Number(diceMatch[1]);
+      const sides = Number(diceMatch[2]);
+      if (!Number.isInteger(count) || count < 1 || count > 100) throw new Error("Количество костей должно быть от 1 до 100.");
+      if (!Number.isInteger(sides) || sides < 2 || sides > 1000) throw new Error("У кости должно быть от 2 до 1000 граней.");
+      totalDice += count;
+      if (totalDice > 200) throw new Error("В одном броске допускается не более 200 костей.");
+      groups.push({ type: "dice", count, sides, sign });
+      cursor += diceMatch[0].length;
+    } else {
+      const numberMatch = rest.match(/^\d+/);
+      if (!numberMatch) throw new Error(`Не удалось разобрать формулу рядом с «${rest}». Используй формат 2d6+3.`);
+      const value = Number(numberMatch[0]);
+      if (value > 100000) throw new Error("Слишком большой модификатор.");
+      modifier += sign * value;
+      groups.push({ type: "modifier", value, sign });
+      cursor += numberMatch[0].length;
+    }
+    sign = 1;
+    hasTerm = true;
+  }
+  if (!hasTerm) throw new Error("Не удалось прочитать формулу урона.");
+  return groups;
+}
+function secureDie(sides) {
+  if (!crypto?.getRandomValues) throw new Error("Браузер не поддерживает безопасную генерацию случайных чисел.");
+  const limit = Math.floor(0x100000000 / sides) * sides;
+  const buffer = new Uint32Array(1);
+  let value;
+  do { crypto.getRandomValues(buffer); value = buffer[0]; } while (value >= limit);
+  return (value % sides) + 1;
+}
+function rollDiceFormula(formula) {
+  const groups = parseDiceFormula(formula);
+  let total = 0;
+  const details = [];
+  for (const group of groups) {
+    if (group.type === "modifier") {
+      total += group.sign * group.value;
+      details.push(`${group.sign < 0 ? "−" : "+"} ${group.value}`);
+      continue;
+    }
+    const rolls = Array.from({ length: group.count }, () => secureDie(group.sides));
+    const subtotal = rolls.reduce((sum, n) => sum + n, 0) * group.sign;
+    total += subtotal;
+    details.push(`${group.sign < 0 ? "− " : ""}${group.count}d${group.sides} (${rolls.join(" + ")})`);
+  }
+  const breakdown = details.join(" ").replace(/^\+\s*/, "").replace(/\s\+\s−/g, " − ");
+  return { formula: String(formula), total, details: `${breakdown} = ${total}` };
+}
+function addRoomRoll(roll) {
+  state.roomRolls.unshift(roll);
+  state.roomRolls = state.roomRolls.slice(0, 8);
+  renderRoomRolls();
+}
+function renderRoomRolls() {
+  const panel = el("rollHistoryPanel");
+  const list = el("rollHistory");
+  if (!panel || !list) return;
+  panel.hidden = state.roomRolls.length === 0;
+  list.replaceChildren();
+  for (const roll of state.roomRolls) {
+    const item = document.createElement("article"); item.className = "roll-entry";
+    const title = document.createElement("strong"); title.textContent = `${roll.spellName || "Бросок урона"} · ${roll.formula}`;
+    const result = document.createElement("div"); result.className = "roll-entry-result"; result.textContent = `${roll.details || ""}`;
+    const meta = document.createElement("div"); meta.className = "roll-entry-meta";
+    const who = roll.remote ? "Бросок участника комнаты" : "Ваш бросок";
+    meta.textContent = `${who}${roll.damageType ? ` · ${roll.damageType}` : ""}`;
+    item.append(title, result, meta); list.append(item);
+  }
+}
+async function performSpellDamageRoll(spell, formula) {
+  try {
+    const result = rollDiceFormula(formula);
+    const roll = {
+      kind: "spell-damage-roll",
+      spellName: spell.name,
+      formula: result.formula,
+      total: result.total,
+      details: result.details,
+      damageType: spell.damageType || "",
+      timestamp: Date.now(),
+    };
+    addRoomRoll(roll);
+    if (state.OBR?.notification?.show) {
+      try { await state.OBR.notification.show(`${spell.name}: ${result.details}`, "SUCCESS"); } catch { /* уведомление не должно ломать бросок */ }
+    }
+    if (state.OBR?.broadcast?.sendMessage) {
+      try {
+        await state.OBR.broadcast.sendMessage(ROLL_CHANNEL, roll, { destination: "REMOTE" });
+        setNotice(`Бросок «${spell.name}»: ${result.total}. Результат отправлен участникам комнаты.`, "success");
+      } catch (error) {
+        setNotice(`Результат: ${result.total}. Не удалось отправить его остальным участникам: ${error.message}`, "error");
+      }
+    } else {
+      setNotice(`Бросок «${spell.name}»: ${result.total}. Вне комнаты результат виден только здесь.`, "success");
+    }
+  } catch (error) {
+    setNotice(`Не удалось бросить кости: ${error.message}`, "error");
+  }
+}
+function addDamageRollSection(parent, spell) {
+  const profiles = Array.isArray(spell.damageProfiles) ? spell.damageProfiles.filter(Boolean) : [];
+  if (!profiles.length) {
+    const fallback = {
+      type: spell.damageType || "",
+      formula: spell.damageFormula || "",
+      atSlotLevel: spell.damageAtSlotLevel || {},
+      atCharacterLevel: spell.damageAtCharacterLevel || {},
+    };
+    if (fallback.formula || Object.keys(fallback.atSlotLevel).length || Object.keys(fallback.atCharacterLevel).length) profiles.push(fallback);
+  }
+  if (!profiles.length) return;
+
+  const section = document.createElement("section"); section.className = "detail-section damage-section";
+  const heading = document.createElement("h3"); heading.textContent = "Бросок урона";
+  const description = document.createElement("p"); description.className = "damage-hint";
+  description.textContent = "Результат рассчитывается без анимации и отправляется участникам, у которых открыта Книга заклинаний.";
+  section.append(heading, description);
+
+  profiles.forEach((profile, index) => {
+    const slotEntries = Object.entries(profile.atSlotLevel || {}).sort((a, b) => Number(a[0]) - Number(b[0]));
+    const characterEntries = Object.entries(profile.atCharacterLevel || {}).sort((a, b) => Number(a[0]) - Number(b[0]));
+    const formulaText = profile.formula || "";
+    const profileWrap = document.createElement("div"); profileWrap.className = "damage-profile";
+    if (profiles.length > 1 || profile.type) {
+      const profileTitle = document.createElement("div"); profileTitle.className = "damage-profile-title";
+      profileTitle.textContent = profile.type ? `Урон: ${profile.type}` : `Вариант урона ${index + 1}`;
+      profileWrap.append(profileTitle);
+    }
+
+    if (slotEntries.length) {
+      const row = document.createElement("div"); row.className = "damage-roll-controls";
+      const label = document.createElement("label"); label.className = "damage-level-label"; label.textContent = "Уровень ячейки";
+      const select = document.createElement("select"); select.className = "damage-level-select";
+      slotEntries.forEach(([level, value]) => {
+        const option = document.createElement("option"); option.value = level; option.textContent = `${level}-й уровень · ${value}`; select.append(option);
+      });
+      const defaultLevel = String(Math.max(Number(spell.level) || 1, Number(slotEntries[0][0])));
+      if (slotEntries.some(([level]) => level === defaultLevel)) select.value = defaultLevel;
+      const rollButton = document.createElement("button"); rollButton.className = "damage-roll-button";
+      let selectedFormula = profile.atSlotLevel[select.value];
+      const updateButton = () => { selectedFormula = profile.atSlotLevel[select.value]; rollButton.textContent = `🎲 Бросить ${selectedFormula}`; };
+      updateButton(); select.addEventListener("change", updateButton);
+      rollButton.addEventListener("click", () => performSpellDamageRoll({ ...spell, damageType: profile.type || spell.damageType }, selectedFormula));
+      label.append(select); row.append(label, rollButton); profileWrap.append(row);
+    } else if (characterEntries.length) {
+      const row = document.createElement("div"); row.className = "damage-roll-controls";
+      const label = document.createElement("label"); label.className = "damage-level-label"; label.textContent = "Уровень персонажа";
+      const select = document.createElement("select"); select.className = "damage-level-select";
+      characterEntries.forEach(([level, value]) => {
+        const option = document.createElement("option"); option.value = level; option.textContent = `${level}-й уровень · ${value}`; select.append(option);
+      });
+      const rollButton = document.createElement("button"); rollButton.className = "damage-roll-button";
+      let selectedFormula = profile.atCharacterLevel[select.value];
+      const updateButton = () => { selectedFormula = profile.atCharacterLevel[select.value]; rollButton.textContent = `🎲 Бросить ${selectedFormula}`; };
+      updateButton(); select.addEventListener("change", updateButton);
+      rollButton.addEventListener("click", () => performSpellDamageRoll({ ...spell, damageType: profile.type || spell.damageType }, selectedFormula));
+      label.append(select); row.append(label, rollButton); profileWrap.append(row);
+    } else if (formulaText) {
+      const match = formulaText.match(/\d*d\d+(?:\s*[+-]\s*(?:\d*d\d+|\d+))*/i);
+      if (!match) return;
+      const button = document.createElement("button"); button.className = "damage-roll-button"; button.textContent = `🎲 Бросить ${match[0]}`;
+      button.addEventListener("click", () => performSpellDamageRoll({ ...spell, damageType: profile.type || spell.damageType }, match[0]));
+      profileWrap.append(button);
+    }
+    section.append(profileWrap);
+  });
+  parent.append(section);
+}
 function levelText(level) { return level === 0 ? "Заговор" : `${level}-й уровень`; }
 function populateFilters(spells) {
   const level = el("levelFilter"), cls = el("classFilter"), school = el("schoolFilter");
@@ -547,6 +772,7 @@ function renderDetail(spell) {
   addStat(stats, "Компоненты", (spell.components || []).join(", ") + (spell.material ? ` · ${spell.material}` : ""));
   addStat(stats, "Длительность", spell.duration + (spell.concentration ? " (концентрация)" : ""));
   wrap.append(top, title, sub, stats);
+  addDamageRollSection(wrap, spell);
   if (spell.classes?.length) {
     const sec = document.createElement("section"); sec.className = "detail-section";
     const h = document.createElement("h3"); h.textContent = "Доступно классам";

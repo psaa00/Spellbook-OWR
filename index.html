@@ -94,6 +94,14 @@
       </section>
     </main>
 
+    <section id="rollHistoryPanel" class="roll-history-panel" hidden aria-live="polite">
+      <div class="roll-history-heading">
+        <div><span class="eyebrow">ИГРОВОЙ ЖУРНАЛ</span><h2>Броски урона</h2></div>
+        <span class="roll-history-note">Последние результаты в комнате</span>
+      </div>
+      <div id="rollHistory" class="roll-history-list"></div>
+    </section>
+
     <section id="adminPanel" class="admin-panel" hidden>
       <div class="admin-heading">
         <div>
@@ -115,7 +123,7 @@
       </div>
       <details class="format-help">
         <summary>Формат файла для импорта</summary>
-        <p>Для JSON используй массив объектов или объект вида <code>{ "spells": [...] }</code>. У записи желательно указать <code>name</code>, <code>level</code> (0–9), <code>school</code>, <code>classes</code> и <code>description</code>. Поддерживаются также названия полей на русском: «Название», «Уровень», «Школа», «Классы», «Описание».</p>
+        <p>Для JSON используй массив объектов или объект вида <code>{ "spells": [...] }</code>. У записи желательно указать <code>name</code>, <code>level</code> (0–9), <code>school</code>, <code>classes</code> и <code>description</code>. Для броска урона добавь <code>damage</code> или <code>damageFormula</code>, например <code>"2d6+3"</code>. Поддерживаются также названия полей на русском, включая «Урон».</p>
         <a href="./example-spells.json" target="_blank" rel="noopener">Посмотреть пример JSON</a>
       </details>
     </section>
